@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import threading
 import time
 from typing import Any
 
@@ -48,8 +49,8 @@ class SystemOneHTTPDecisionModel:
         model: str,
         model_repo: str,
         model_revision: str,
-        serving_bundle_sha256: str,
-        inference_image: str = XOR_SGLANG_IMAGE,
+        serving_bundle_sha256: str | None,
+        inference_image: str | None = XOR_SGLANG_IMAGE,
         max_candidates: int = 26,
         max_rendered_state_characters: int = 4 * 1024 * 1024,
         max_request_bytes: int = 8 * 1024 * 1024,
@@ -58,11 +59,15 @@ class SystemOneHTTPDecisionModel:
         adapter_name: str = XOR_ADAPTER_NAME,
         probability_source: str = XOR_PROBABILITY_SOURCE,
         api_key_env: str | None = None,
+        max_requests_per_minute: int | None = None,
+        expected_response_model: str | None = None,
     ) -> None:
         if max_candidates < 2:
             raise ValueError("max_candidates must be at least two")
         if max_rendered_state_characters < 1 or max_request_bytes < 1:
             raise ValueError("serving input limits must be positive")
+        if max_requests_per_minute is not None and max_requests_per_minute < 1:
+            raise ValueError("max_requests_per_minute must be positive")
         headers: dict[str, str] = {}
         if api_key_env is not None:
             api_key = os.environ.get(api_key_env, "").strip()
@@ -77,6 +82,7 @@ class SystemOneHTTPDecisionModel:
         self.model_revision = model_revision
         self.serving_bundle_sha256 = serving_bundle_sha256
         self.inference_image = inference_image
+        self.hosted_service = serving_bundle_sha256 is None and inference_image is None
         self.max_candidates = max_candidates
         self.max_rendered_state_characters = max_rendered_state_characters
         self.max_request_bytes = max_request_bytes
@@ -88,6 +94,10 @@ class SystemOneHTTPDecisionModel:
         self.adapter_name = adapter_name
         self.probability_source = probability_source
         self.endpoint_authentication = "bearer" if headers else "none"
+        self.max_requests_per_minute = max_requests_per_minute
+        self.expected_response_model = expected_response_model
+        self._pace_lock = threading.Lock()
+        self._next_request_start = 0.0
         self._client = httpx.Client(
             base_url=self.base_url, timeout=timeout_seconds, headers=headers
         )
@@ -101,11 +111,14 @@ class SystemOneHTTPDecisionModel:
             "model_revision": self.model_revision,
             "serving_bundle_sha256": self.serving_bundle_sha256,
             "inference_image": self.inference_image,
+            "hosted_service": self.hosted_service,
             "native_contract_version": SYSTEM_ONE_HTTP_CONTRACT_VERSION,
             "endpoint_base_url": self.base_url,
             "endpoint_path": "/v1/systemone",
             "endpoint_authentication": self.endpoint_authentication,
             "max_retries": self.max_retries,
+            "max_requests_per_minute": self.max_requests_per_minute,
+            "expected_response_model": self.expected_response_model,
             "max_candidates": self.max_candidates,
             "max_rendered_state_characters": self.max_rendered_state_characters,
             "max_request_bytes": self.max_request_bytes,
@@ -151,6 +164,7 @@ class SystemOneHTTPDecisionModel:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
+                self._pace_request()
                 http_response = self._client.post("/v1/systemone", json=request)
                 if http_response.is_error:
                     detail = http_response.text[:2000]
@@ -162,6 +176,11 @@ class SystemOneHTTPDecisionModel:
                 response = http_response.json()
                 if not isinstance(response, dict):
                     raise TypeError("SystemOne response is not an object")
+                if (
+                    self.expected_response_model is not None
+                    and response.get("model") != self.expected_response_model
+                ):
+                    raise ValueError("SystemOne response model does not match the requested model")
                 answer = response["answers"]["decision"]
                 if not isinstance(answer, dict):
                     raise TypeError("SystemOne response answer is not an object")
@@ -200,6 +219,17 @@ class SystemOneHTTPDecisionModel:
                 time.sleep(min(2**attempt, 16))
         assert last_error is not None
         raise last_error
+
+    def _pace_request(self) -> None:
+        if self.max_requests_per_minute is None:
+            return
+        with self._pace_lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next_request_start - now)
+            if delay:
+                time.sleep(delay)
+                now = time.monotonic()
+            self._next_request_start = now + 60.0 / self.max_requests_per_minute
 
     def close(self) -> None:
         self._client.close()

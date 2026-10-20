@@ -33,6 +33,7 @@ the reason to [add a model adapter](../contributing/adding_a_model.md).
 | `run-jev-openrouter` | [`typesafe/jev-1.13`](https://openrouter.ai/typesafe/jev-1.13) | OpenRouter Decisions API distributions |
 | `run-system-one-http` | [`juspay/xor`](https://huggingface.co/juspay/xor) | Released Jev-compatible SystemOne API; forward/reverse option-letter logprobs with published calibration; up to 26 candidates |
 | `run-system-one-http` (`jobs/run_imajev_eval.sh`) | [`mohit67890/imajev-4b`](https://huggingface.co/mohit67890/imajev-4b) | Open-weight Jev-compatible SystemOne server (Qwen3.5-4B + LoRA + trained 256-code decision readout); direct candidate scoring averaged over 4 option rotations, temperature-calibrated; up to 255 candidates, 65,536 input tokens |
+| `run-system-one-http --hosted-service` | [Nace Drex Max](https://console.nace.ai/docs/drex/guides/drex-max) (`drex-max`) | Hosted System One API; native Noul, Choice, and Score distributions, up to 255 candidates, with no truncation. Record a dated hosted-service snapshot; the hosted weights and serving bundle are not publicly pinned. |
 | `run-openrouter` | An OpenRouter chat model that can produce the required JSON-schema probability vector | Structured probability vector |
 | `run-openrouter-top-logprobs` | An OpenRouter chat model that returns every required candidate in top-logprobs | Conditional next-token probabilities |
 
@@ -81,3 +82,12 @@ candidates remain explicit unsupported rows; at 65,536 input tokens every Decisi
 The run records `adapter=imajev-serving-systemone-v1` and
 `probability_source=trained_readout_4_rotation_mean_temperature_calibrated_v1` through the
 `--adapter-name` / `--probability-source` options.
+
+For Drex Max, use the hosted System One runner with `--api-key-env` naming an environment
+variable containing the Nace API key, `--hosted-service`, `--model drex-max`,
+`--max-candidates 255`, `--max-request-bytes 4194304`, and
+`--expected-response-model drex-max`. Set `--model-revision` to the dated hosted-service
+snapshot being measured. The API reports native candidate probabilities; the runner does
+not ask for a generated probability vector. Set `--rpm` to the account's measured limit
+with margin. This benchmark's frozen inputs are textual, so Drex Max's image capability
+is not exercised by this result.

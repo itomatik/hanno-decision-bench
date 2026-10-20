@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from decision_bench.models import system_one_http
 from decision_bench.models.system_one_http import (
     XOR_ADAPTER_NAME,
     XOR_PROBABILITY_SOURCE,
@@ -221,3 +222,46 @@ def test_hosted_key_reaches_endpoint_but_not_inspect_artifacts(
     [log_path] = (tmp_path / "inspect").glob("*.eval")
     log = read_eval_log(str(log_path))
     assert secret not in log.model_dump_json()
+
+
+def test_hosted_metadata_omits_unpublished_serving_identity() -> None:
+    with _model(
+        serving_bundle_sha256=None,
+        inference_image=None,
+        model_revision="hosted-api-snapshot-2026-10-20",
+        max_requests_per_minute=900,
+        expected_response_model="drex-max",
+    ) as model:
+        metadata = model.metadata
+    assert metadata["hosted_service"] is True
+    assert metadata["serving_bundle_sha256"] is None
+    assert metadata["inference_image"] is None
+    assert metadata["max_requests_per_minute"] == 900
+    assert metadata["expected_response_model"] == "drex-max"
+
+
+def test_request_pacing_limits_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [100.0]
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(system_one_http.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(system_one_http.time, "sleep", sleep)
+    with _model(max_requests_per_minute=60) as model:
+        model._pace_request()
+        model._pace_request()
+        model._pace_request()
+    assert sleeps == [1.0, 1.0]
+    assert clock[0] == 102.0
+
+
+def test_response_model_mismatch_is_an_error() -> None:
+    with _model(expected_response_model="drex-max", max_retries=0) as model:
+        seen: list[httpx.Request] = []
+        _answer_with(model, seen)
+        with pytest.raises(ValueError, match="does not match"):
+            model.predict(_example(2))
+    assert len(seen) == 1
